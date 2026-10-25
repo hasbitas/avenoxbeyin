@@ -52,46 +52,61 @@ class SecretVariantsTest(unittest.TestCase):
         clean = 'Before\u200b (' + KEY + ') after\u2060.'
         self.assertEqual(redact(clean, self.state), ('Before\u200b ([REDACTED]) after\u2060.', 1))
 
-    def test_base64_variants_mask_the_whole_encoded_piece_on_note_create(self):
-        secrets = (KEY, KEY, 'sk-\u200b' + 'A' * 40, KEY, 'sk-' + 'A' * 26, KEY,
-                   'AKIA' + 'Q' * 16, 'sk-' + 'A' * 20)
+    def test_base64_representations_are_deliberately_unsupported(self):
+        """Like the filter docstring, encoded secrets are not decoded or masked."""
         values = (ENCODED, 'c2st' + 'QUFB' * 13 + 'QQ==',
                   base64.b64encode(('sk-\u200b' + 'A' * 40).encode()).decode('ascii'),
                   base64.b64encode(('Before ' + KEY + ' after').encode()).decode('ascii'),
                   base64.b64encode(('sk-' + 'A' * 26).encode()).decode('ascii'),
                   base64.b64encode(b'\xff ' + KEY.encode() + b' \xfe').decode('ascii'),
-                  base64.b64encode(secrets[6].encode()).decode('ascii'),
-                  base64.b64encode(secrets[7].encode()).decode('ascii'))
-        for number, (value, secret) in enumerate(zip(values, secrets)):
+                  base64.b64encode(('AKIA' + 'Q' * 16).encode()).decode('ascii'),
+                  base64.b64encode(('sk-' + 'A' * 20).encode()).decode('ascii'),
+                  base64.b64encode(('AKIA' + 'Q' * 16 + '|' + KEY).encode()).decode('ascii'),
+                  'k=' + ENCODED, 'path/' + ENCODED)
+        for number, value in enumerate(values):
             with self.subTest(number=number):
-                self.assert_masked_note(number, value, secret)
+                self.assertEqual(redact(value, self.state), (value, 0))
+                self.assertIsNone(_safe(self.engine.store, {'statement': value}))
+                result = self.engine.note_create(f'notes/base64-{number}.md', value)
+                self.assertEqual(result['redacted'], 0)
+                self.assertIn(value, (self.vault / result['source']).read_text(encoding='utf-8'))
 
-    def test_base64_assignment_and_path_boundaries(self):
-        for number, text in enumerate(('k=' + ENCODED, 'api_key=' + ENCODED, 'path/' + ENCODED)):
-            with self.subTest(number=number):
-                filtered, count = redact(text, self.state)
-                self.assertEqual(count, 1)
-                self.assertNotIn(ENCODED, filtered)
-                self.assertIn('[REDACTED]', filtered)
-        for text in ('id' + ENCODED, ENCODED + 'id'):
-            with self.subTest(text=text[:12]):
-                self.assertEqual(redact(text, self.state), (text, 0))
-
-    def test_base64_secrets_are_counted_individually(self):
-        encoded = base64.b64encode(('AKIA' + 'Q' * 16 + '|' + 'sk-' + 'B' * 20).encode()).decode('ascii')
-        self.assertEqual(redact(encoded, self.state), ('[REDACTED]', 2))
-        result = self.engine.note_create('notes/multiple-encoded.md', encoded)
-        self.assertEqual(result['redacted'], 2)
-
-    def test_format_only_custom_literal_cannot_redact_ordinary_text(self):
+    def test_short_normalized_custom_literals_retain_only_raw_matches(self):
         self.state.mkdir(parents=True, exist_ok=True)
-        (self.state / 'secret-patterns.txt').write_text('\ufeff\ufeff\ufeffa\n', encoding='utf-8')
         clean = 'Bu not tamamen zararsiz bir metin; anahtar yok.'
-        self.assertEqual(redact(clean, self.state), (clean, 0))
-        self.assertIsNone(_safe(self.engine.store, {'statement': clean}))
+        for literal in ('\ufeff\ufeff\ufeffa', '\ufeff' * 4, '\u200bab\u200b', 'a\u2060bc'):
+            with self.subTest(literal=ascii(literal)):
+                (self.state / 'secret-patterns.txt').write_text(literal + '\n', encoding='utf-8')
+                self.assertEqual(redact(literal, self.state), ('[REDACTED]', 1))
+                with self.assertRaisesRegex(ValueError, '^advisor_sensitive_input$'):
+                    _safe(self.engine.store, {'statement': literal})
+                self.assertEqual(redact(clean, self.state), (clean, 0))
+                self.assertIsNone(_safe(self.engine.store, {'statement': clean}))
+
+    def test_placeholder_normalized_custom_literals_retain_only_raw_matches(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        for literal, clean in (('[RE\u200bDACTED]', 'Already [REDACTED].'),
+                               ('prefix[RE\u200bDACTED]suffix', 'Already prefix[REDACTED]suffix.')):
+            with self.subTest(literal=ascii(literal)):
+                (self.state / 'secret-patterns.txt').write_text(literal + '\n', encoding='utf-8')
+                self.assertEqual(redact(clean, self.state), (clean, 0))
+                self.assertIsNone(_safe(self.engine.store, {'statement': clean}))
+                self.assertEqual(redact(literal, self.state), ('[REDACTED]', 1))
+                with self.assertRaisesRegex(ValueError, '^advisor_sensitive_input$'):
+                    _safe(self.engine.store, {'statement': literal})
+
+    def test_safe_custom_literal_normalization_preserves_surrounding_format(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        (self.state / 'secret-patterns.txt').write_text('my-\u200bsecret\n', encoding='utf-8')
+        for value in ('my-secret', 'my-\u200bsecret', 'my-\u2060secret'):
+            with self.subTest(value=ascii(value)):
+                self.assertEqual(redact('Before\u200b (' + value + ') after\u2060.', self.state),
+                                 ('Before\u200b ([REDACTED]) after\u2060.', 1))
+                with self.assertRaisesRegex(ValueError, '^advisor_sensitive_input$'):
+                    _safe(self.engine.store, {'statement': value})
 
     def test_jev_rejects_variants_in_nested_values_and_keys(self):
-        for value in (KEY, 'sk-\u200b' + 'A' * 40, ENCODED):
+        for value in (KEY, 'sk-\u200b' + 'A' * 40):
             for payload in ({'cards': [{'statement': value}]}, {value: 'ordinary text'}):
                 with self.subTest(value=value[:8], payload=type(payload).__name__):
                     with self.assertRaisesRegex(ValueError, '^advisor_sensitive_input$'):
@@ -120,7 +135,7 @@ class SecretVariantsTest(unittest.TestCase):
                 self.assertIsNone(_safe(self.engine.store, {'statement': text}))
 
     def test_large_plain_and_encoded_inputs_have_a_loose_time_guard(self):
-        plain = ('Ordinary project notes; no credentials here. ' * 6000)[:260 * 1024]
+        plain = ('Ordinary project notes; no credentials here. ' * 7000)[:260 * 1024]
         encoded = base64.b64encode(random.Random(9).randbytes(204288)).decode('ascii')
         for name, text in (('plain', plain), ('encoded', encoded)):
             with self.subTest(name=name):
@@ -128,7 +143,13 @@ class SecretVariantsTest(unittest.TestCase):
                 self.assertEqual(redact(text, self.state), (text, 0))
                 self.assertLess(time.monotonic() - started, 4.0)
 
-    def test_installed_cli_masks_unicode_and_base64(self):
+    def test_invalid_base64_slash_run_has_no_candidate_scanning_cost(self):
+        text = 'A/' * 32000 + '==='
+        started = time.monotonic()
+        self.assertEqual(redact(text, self.state), (text, 0))
+        self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_installed_cli_masks_unicode_and_leaves_base64_unsupported(self):
         home = Path(self.tmp.name) / 'home'
         home.mkdir()
         env = inherited_env(HOME=str(home), USERPROFILE=str(home), APPDATA=str(home / 'appdata'),
@@ -136,17 +157,21 @@ class SecretVariantsTest(unittest.TestCase):
                             PYTHONDONTWRITEBYTECODE='1', PYTHONIOENCODING='utf-8')
         installed = install(self.vault, self.state, env)
         self.assertEqual(installed.returncode, 0, installed.stderr)
-        for number, value in enumerate(('sk-\u200b' + 'A' * 40, ENCODED)):
+        for number, (value, expected) in enumerate((('sk-\u200b' + 'A' * 40, 1), (ENCODED, 0))):
             with self.subTest(number=number):
                 done = subprocess.run([sys.executable, str(self.vault / 'beyin.py'), 'note-create', '--json'],
                                       input=json.dumps({'source': f'notes/cli-{number}.md', 'text': value}).encode(),
                                       cwd=self.vault, env=env, capture_output=True, timeout=60)
                 self.assertEqual(done.returncode, 0, done.stderr.decode('utf-8', errors='replace'))
                 result = json.loads(done.stdout)
-                self.assertGreaterEqual(result['redacted'], 1)
+                self.assertEqual(result['redacted'], expected)
                 stored = (self.vault / result['source']).read_text(encoding='utf-8')
-                self.assertNotIn(value, stored)
-                self.assertIn('[REDACTED]', stored)
+                if expected:
+                    self.assertNotIn(value, stored)
+                    self.assertIn('[REDACTED]', stored)
+                else:
+                    self.assertIn(value, stored)
+                    self.assertNotIn('[REDACTED]', stored)
 
 
 if __name__ == '__main__':
