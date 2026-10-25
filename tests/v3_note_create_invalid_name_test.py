@@ -1,13 +1,22 @@
 """Portable note-create names must be rejected before durable journal writes."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
 
-from v3_package_helpers import inherited_env, install
+# The helpers import unittest.mock/asyncio, which also needs Windows runtime lookup.
+_systemroot = os.environ.get('SYSTEMROOT')
+try:
+    if os.name == 'nt' and _systemroot is None:
+        os.environ['SYSTEMROOT'] = os.environ.get('WINDIR', r'C:\Windows')
+    from v3_package_helpers import inherited_env, install, windows_runtime_env
+finally:
+    if os.name == 'nt' and _systemroot is None:
+        os.environ.pop('SYSTEMROOT', None)
 
 
 class NoteCreateInvalidNameTest(unittest.TestCase):
@@ -21,6 +30,10 @@ class NoteCreateInvalidNameTest(unittest.TestCase):
         self.env = inherited_env(HOME=str(home), USERPROFILE=str(home), APPDATA=str(home / 'appdata'),
                                  LOCALAPPDATA=str(home / 'localappdata'), BEYIN_V3_NO_SPAWN='1',
                                  PYTHONDONTWRITEBYTECODE='1', PYTHONIOENCODING='utf-8')
+        self.env.update(windows_runtime_env())
+        if os.name == 'nt':
+            # A cleared parent environment may not supply either Windows variable.
+            self.env.setdefault('SYSTEMROOT', self.env.get('WINDIR', r'C:\Windows'))
         installed = install(self.vault, self.state, self.env)
         self.assertEqual(installed.returncode, 0, installed.stderr.decode('utf-8', errors='replace'))
 
@@ -34,15 +47,26 @@ class NoteCreateInvalidNameTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr.decode('utf-8', errors='replace'))
         return json.loads(done.stdout.decode('utf-8'))
 
-    def refused(self, source, message):
-        done = self.command('note-create', payload={'source': source, 'text': 'Synthetic calibration note.',
-                                                  'metadata': {'id': 'synthetic-invalid'}})
+    def source_files(self, folder):
+        return sorted(path.relative_to(self.vault).as_posix()
+                      for path in (self.vault / folder).rglob('*') if path.is_file())
+
+    def refused(self, source, message, command='note-create'):
+        knowledge_before, tasks_before = self.source_files('knowledge'), self.source_files('tasks')
+        metadata = {'id': 'synthetic-invalid-' + hashlib.sha256(source.encode()).hexdigest()[:12]}
+        if command == 'task-create':
+            metadata.update(owner='Synthetic Reviewer', status='active')
+        done = self.command(command, payload={'source': source, 'text': 'Synthetic calibration note.',
+                                              'metadata': metadata})
         self.assertNotEqual(done.returncode, 0)
-        self.assertEqual(list((self.state / 'markdown-journal').iterdir()), [],
-                         'invalid note-create must not leave a durable journal intent')
         error = json.loads(done.stderr.decode('utf-8'))
         self.assertEqual(error['error'], 'ValueError')
         self.assertIn(message, error['message'])
+        self.assertEqual(list((self.state / 'markdown-journal').glob('*')), [],
+                         'invalid source must not leave a durable journal intent')
+        self.assertFalse((self.vault / source).exists())
+        self.assertEqual(self.source_files('knowledge'), knowledge_before)
+        self.assertEqual(self.source_files('tasks'), tasks_before)
         self.assertEqual(self.succeeded('sync')['status'], 'succeeded')
         self.succeeded('context', 'Synthetic calibration')
 
@@ -59,6 +83,16 @@ class NoteCreateInvalidNameTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.refused('knowledge/' + name, 'only visible vault-relative sources are supported')
 
+    def test_task_create_rejects_invalid_names_before_journaling(self):
+        for name, message in (
+                ('a.md:akis.md', 'use a vault-relative Markdown path'),
+                ('CON.md', 'device paths are not sources'),
+                ('NUL.md', 'device paths are not sources'),
+                ('nokta./task.md', 'only visible vault-relative sources are supported'),
+                ('bosluk /task.md', 'only visible vault-relative sources are supported')):
+            with self.subTest(name=name):
+                self.refused('tasks/' + name, message, command='task-create')
+
     def test_valid_note_create_and_edit_still_work(self):
         source = 'knowledge/calibration.md'
         created = self.succeeded('note-create', payload={'source': source, 'text': 'Synthetic calibration note.',
@@ -71,7 +105,7 @@ class NoteCreateInvalidNameTest(unittest.TestCase):
             'edits': [{'old': 'Synthetic calibration note.', 'new': 'Synthetic calibration updated.'}]})
         self.assertEqual(edited['status'], 'written')
         self.assertIn(b'Synthetic calibration updated.', path.read_bytes())
-        self.assertEqual(list((self.state / 'markdown-journal').iterdir()), [])
+        self.assertEqual(list((self.state / 'markdown-journal').glob('*')), [])
         self.assertEqual(self.succeeded('sync')['status'], 'succeeded')
         self.succeeded('context', 'Synthetic calibration')
 

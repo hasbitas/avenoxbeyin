@@ -1341,6 +1341,7 @@ class SyncEngine:
                                 'conflicts': result['conflicts']}}
 
     def task_create(self, source, text, metadata):
+        validate_source_name(source)
         if not isinstance(source, str) or not source.startswith('tasks/') or not source.endswith('.md'):
             raise ValueError('task-create source must be a tasks/ Markdown path')
         if not isinstance(text, str) or not text.strip() or not isinstance(metadata, dict):
