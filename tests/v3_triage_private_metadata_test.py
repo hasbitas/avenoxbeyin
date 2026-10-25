@@ -62,6 +62,17 @@ class PrivateMetadataTriageTest(unittest.TestCase):
         self.assertIn('H03-PUBLIC', raw)
         self.assertIn('H03-PUBLIC', human)
 
+    def test_deep_json_private_metadata_is_skipped_and_digest_continues(self):
+        knowledge = self.vault / 'knowledge'
+        deep_value = '[' * 30000 + '0' + ']' * 30000
+        (knowledge / 'deep-private.md').write_text(
+            '---\n{"visibility": "private", "nested": ' + deep_value
+            + ', "updated_at": "2026-10-25"}\n---\nH03-DEEP-PRIVATE-BODY\n',
+            encoding='utf-8',
+        )
+        digest = json.loads(self.triage('--json'))['digest']
+        self.assertEqual([item['path'] for item in digest['items']], ['knowledge/public.md'])
+
 
 if __name__ == '__main__':
     unittest.main()

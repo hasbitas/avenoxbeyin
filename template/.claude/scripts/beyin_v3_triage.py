@@ -285,7 +285,7 @@ def _scan_front_values(path, keys):
             if line.strip() == '---':
                 try:
                     metadata, _ = parse(''.join(lines))
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, RecursionError):
                     return None
                 return {key: fold(str(metadata[key])).strip() for key in keys
                         if key in metadata and metadata[key] is not None}
