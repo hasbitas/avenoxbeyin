@@ -1,11 +1,22 @@
-"""Opt-in local secret redaction for user-authored V3 write commands."""
+"""Opt-in local secret redaction for user-authored V3 write commands.
+
+Known patterns and custom literals are scanned in plain text (including code
+blocks), ignoring Unicode Cf format characters while redacting the original span.
+Valid standard base64 pieces of at least 40 characters are decoded once as UTF-8
+and scanned the same way; a secret masks the whole encoded piece. Arbitrary binary
+blobs are not secrets. Nested encodings, base64url and line-split representations
+are not decoded or joined; joining lines would create false positives.
+"""
 from __future__ import annotations
 
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+import base64
+import binascii
 import re
 import sqlite3
+import unicodedata
 
 
 BUILTIN_PATTERNS = (
@@ -63,19 +74,64 @@ def _custom_literals(state):
     return values
 
 
+BASE64_PIECE = re.compile(r'(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{38,}={0,2}(?![A-Za-z0-9+/=])')
+
+
+def _without_format(text):
+    return ''.join(character for character in text if unicodedata.category(character) != 'Cf')
+
+
+def _sub_normalized(pattern, text, replacement):
+    # Positions map the search view back to the original, including interior Cf.
+    positions = [index for index, character in enumerate(text)
+                 if unicodedata.category(character) != 'Cf']
+    normalized = text if len(positions) == len(text) else ''.join(text[index] for index in positions)
+    parts, end, count = [], 0, 0
+    for match in pattern.finditer(normalized):
+        value = replacement(match)
+        if value is None:
+            continue
+        start, stop = positions[match.start()], positions[match.end() - 1] + 1
+        parts.extend((text[end:start], value))
+        end = stop
+        count += 1
+    parts.append(text[end:])
+    return ''.join(parts), count
+
+
+def _redact_plain(text, literals):
+    result, count = text, 0
+    for pattern in BUILTIN_PATTERNS:
+        result, matches = _sub_normalized(pattern, result, lambda match: '[REDACTED]')
+        count += matches
+    for literal in literals:
+        literal = _without_format(literal)
+        if literal:
+            result, matches = _sub_normalized(re.compile(re.escape(literal)), result,
+                                              lambda match: '[REDACTED]')
+            count += matches
+    return result, count
+
+
 def redact(text, state):
     if not isinstance(text, str):
         raise ValueError('secret filter input must be text')
-    result, count = text, 0
-    for pattern in BUILTIN_PATTERNS:
-        result, matches = pattern.subn('[REDACTED]', result)
-        count += matches
-    for literal in _custom_literals(state):
-        matches = result.count(literal)
-        if matches:
-            result = result.replace(literal, '[REDACTED]')
-            count += matches
-    return result, count
+    literals = _custom_literals(state)
+    result, count = _redact_plain(text, literals)
+
+    def encoded_secret(match):
+        piece = match.group()
+        if len(piece) < 40:
+            return None
+        try:
+            decoded = base64.b64decode(piece, validate=True).decode('utf-8', errors='replace')
+        except binascii.Error:
+            return None
+        _, matches = _redact_plain(decoded, literals)
+        return '[REDACTED]' if matches else None
+
+    result, matches = _sub_normalized(BASE64_PIECE, result, encoded_secret)
+    return result, count + matches
 
 
 def record(state, count):
