@@ -14,6 +14,8 @@ import math
 
 # metadata row: the folded directory names the last sync kept out of the index, as a JSON list.
 EXCLUDED_DIRS_ROW = 'index_excluded_dirs'
+# metadata row: the sources the last sync could not read or parse, as a JSON list.
+UNREADABLE_SOURCES_ROW = 'index_unreadable_sources'
 RECEIPT_VIEW_SOURCES_ROW = 'receipt_view_sources'
 RECEIPT_VIEW_RECEIPT_SUFFIX = '.md.view-provenance.json'
 
@@ -27,34 +29,53 @@ def _record_excluded_dirs(engine, db):
     is committed together with the record deletions (or re-indexing) the list caused, so it
     always describes the records the same reader sees. A release without the row ignores it.
     """
-    keys = getattr(engine, 'excluded_dir_keys', None)
-    if keys is None:
+    _record_names(db, EXCLUDED_DIRS_ROW, getattr(engine, 'excluded_dir_keys', None))
+
+
+def _record_unreadable_sources(engine, db):
+    """Store the sources this sync's scan could not read or parse, in the same transaction.
+
+    Such a source has no record, so its last known visibility is gone with it: a private note
+    whose frontmatter breaks loses its record on the next sync. The receipt readers withhold
+    these paths like private ones until a sync indexes them again.
+    """
+    _record_names(db, UNREADABLE_SOURCES_ROW, getattr(engine, 'unreadable_sources', None))
+
+
+def _record_names(db, key, names):
+    if names is None:
         return  # no scan ran on this engine; the stored row still describes the index
-    stored = db.execute('SELECT value FROM metadata WHERE key=?', (EXCLUDED_DIRS_ROW,)).fetchone()
-    value = json.dumps(sorted(keys), ensure_ascii=False) if keys else None
+    stored = db.execute('SELECT value FROM metadata WHERE key=?', (key,)).fetchone()
+    value = json.dumps(sorted(names), ensure_ascii=False) if names else None
     if value is None:
         if stored:
-            db.execute('DELETE FROM metadata WHERE key=?', (EXCLUDED_DIRS_ROW,))
+            db.execute('DELETE FROM metadata WHERE key=?', (key,))
     elif not stored or stored[0] != value:
-        db.execute('INSERT OR REPLACE INTO metadata VALUES (?,?)', (EXCLUDED_DIRS_ROW, value))
+        db.execute('INSERT OR REPLACE INTO metadata VALUES (?,?)', (key, value))
 
 
-def _excluded_dir_keys(db):
+def _stored_names(db, key):
     try:
-        stored = db.execute('SELECT value FROM metadata WHERE key=?', (EXCLUDED_DIRS_ROW,)).fetchone()
+        stored = db.execute('SELECT value FROM metadata WHERE key=?', (key,)).fetchone()
         value = json.loads(stored[0]) if stored else []
     except (sqlite3.OperationalError, ValueError):  # a bare receipts-only database has no metadata
         return frozenset()
-    return frozenset(key for key in value if isinstance(key, str)) if isinstance(value, list) else frozenset()
+    return frozenset(name for name in value if isinstance(name, str)) if isinstance(value, list) else frozenset()
+
+
+def _excluded_dir_keys(db):
+    return _stored_names(db, EXCLUDED_DIRS_ROW)
 
 
 def _hidden_ref_sources(db, refs):
     """Sources that default internal context never shows: indexed records behind the _eligible
-    visibility/trust gate, and every path under a directory the last sync kept out of the index.
+    visibility/trust gate, every path under a directory the last sync kept out of the index, and
+    every source the last sync could not read or parse.
 
     A path under an excluded directory has no record, so nothing says whether it is private.
     Excluding a directory must not turn a withheld ref into a shown one, so such a path is
-    withheld like a private one, whatever the file says.
+    withheld like a private one, whatever the file says. An unreadable source is the same:
+    breaking a private note's metadata must not open the receipts that describe it.
     """
     refs = sorted(set(refs))
     from beyin_v3_hygiene import sensitive_source
@@ -66,6 +87,7 @@ def _hidden_ref_sources(db, refs):
         hidden.update(set(refs).intersection(json.loads(row[0]) if row else []))
     except sqlite3.OperationalError:  # receipts-only reader
         pass
+    hidden.update(set(refs).intersection(_stored_names(db, UNREADABLE_SOURCES_ROW)))
     excluded = _excluded_dir_keys(db)
     if excluded:
         from beyin_v3_index import dir_key
@@ -866,6 +888,7 @@ def project_receipts(engine, db, warnings=None, recover_views=False, recovered=N
                      allow_view_writes=True):
     _hash, atomic, _ = engine.projection_helpers()
     _record_excluded_dirs(engine, db)
+    _record_unreadable_sources(engine, db)
     _prepare_receipt_views(db)
     if not allow_view_writes:
         # Indexing and context gates can still commit. Keep the last live

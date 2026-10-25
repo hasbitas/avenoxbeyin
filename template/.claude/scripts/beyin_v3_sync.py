@@ -478,6 +478,9 @@ class SyncEngine:
     index_exclusions = None
     # Folded names that scan took out of the index; None until a scan has run on this engine.
     excluded_dir_keys = None
+    # Sources that scan could not read or parse, so it indexed no record and no visibility for
+    # them; None until a scan has run on this engine.
+    unreadable_sources = None
 
     def projection_helpers(self):
         return _hash, atomic, render
@@ -779,6 +782,8 @@ class SyncEngine:
         and its value in the returned records is None: sync keeps that record as indexed."""
         records, warnings, conflicts = {}, [], []
         duplicate = set()
+        # Stored by project_receipts with this sync's record deletions, like excluded_dir_keys.
+        unreadable = self.unreadable_sources = set()
         # Provenance is independent of editable frontmatter. Prove paths before
         # taking their identities so aliases on case-insensitive volumes are also
         # excluded, without treating distinct case-sensitive files as the same note.
@@ -863,6 +868,7 @@ class SyncEngine:
                         cache.read(relative, st, record['id'])
                 except (ValueError, OSError, UnicodeError) as exc:
                     warnings.append({'source': relative, 'reason': str(exc)})
+                    unreadable.add(relative)
         for id in sorted(duplicate):
             records.pop(id, None)
             conflicts.append({'id': id, 'reason': 'duplicate source id; all copies quarantined'})
