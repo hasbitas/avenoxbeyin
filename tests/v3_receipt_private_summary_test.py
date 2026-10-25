@@ -79,6 +79,27 @@ class PrivateSummaryTest(unittest.TestCase):
         self.assertIn(self.GENERAL, text)
         self.assertNotIn(self.LATER, json.dumps(self.beyin('recap'), ensure_ascii=False))
 
+    def test_a_script_under_an_excluded_directory_keeps_the_summary(self):
+        # Only Markdown carries visibility: a ref to a script in an excluded code tree is no
+        # reason to withhold the summary, while a note in that tree stays withheld.
+        (self.vault / 'araclar').mkdir()
+        (self.vault / 'araclar/arac.py').write_bytes(b'print(1)\n')
+        (self.vault / 'araclar/not.md').write_bytes(b'Arac notu.\n')
+        self.beyin('preferences', '--index-exclude-dir', 'araclar')
+        self.beyin('sync')
+        script, note = 'Zirkonbetik kaydi.', 'Zirkonarac notu kaydi.'
+        self.beyin('receipt', '--event-id', 'synthetic-script', '--summary', script, '--ref', 'araclar/arac.py')
+        self.beyin('receipt', '--event-id', 'synthetic-tree-note', '--summary', note, '--ref', 'araclar/not.md')
+        self.beyin('sync')
+        items = self.beyin('recap')['items']
+        shown = [item['summary'] for item in items]
+        self.assertIn(script, shown)
+        self.assertNotIn(note, shown)
+        self.assertEqual([item['refs'] for item in items if item['summary'] == script], [['araclar/arac.py']])
+        text = self.views()
+        self.assertIn(script, text)
+        self.assertNotIn(note, text)
+
 
 if __name__ == '__main__':
     unittest.main()

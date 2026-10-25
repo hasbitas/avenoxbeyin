@@ -96,8 +96,10 @@ def _hidden_ref_sources(db, refs):
     excluded = _excluded_dir_keys(db)
     if excluded:
         from beyin_v3_index import dir_key
-        hidden.update(ref for ref in refs
-                      if any(dir_key(part) in excluded for part in ref.replace('\\', '/').split('/')[:-1]))
+        # Only a Markdown source can carry visibility; a script or data file under an excluded
+        # tree has no record anywhere, so its path says nothing private.
+        hidden.update(ref for ref in refs if ref.casefold().endswith('.md') and
+                      any(dir_key(part) in excluded for part in ref.replace('\\', '/').split('/')[:-1]))
     for start in range(0, len(refs), 500):
         chunk = refs[start:start + 500]
         try:
