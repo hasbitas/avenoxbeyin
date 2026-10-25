@@ -90,7 +90,9 @@ def _hidden_ref_sources(db, refs):
         hidden.update(set(refs).intersection(json.loads(row[0]) if row else []))
     except sqlite3.OperationalError:  # receipts-only reader
         pass
-    hidden.update(set(refs).intersection(_stored_names(db, UNREADABLE_SOURCES_ROW)))
+    # Folded like the record lookup below: another spelling of an unreadable source is withheld too.
+    unreadable = {name.casefold() for name in _stored_names(db, UNREADABLE_SOURCES_ROW)}
+    hidden.update(ref for ref in refs if ref.casefold() in unreadable)
     excluded = _excluded_dir_keys(db)
     if excluded:
         from beyin_v3_index import dir_key
