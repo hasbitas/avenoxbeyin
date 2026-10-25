@@ -263,6 +263,35 @@ def _scan_keys(vault, state):
     return exclusions(state, vault)[0]
 
 
+def _scan_front_values(path, keys):
+    from beyin_v3_sync import parse
+    limit = 1024 * 1024
+    with path.open(encoding='utf-8', errors='replace') as handle:
+        first = handle.readline(limit + 1)
+        if first.lstrip('\ufeff').strip() != '---':
+            return {}
+        if len(first) > limit:
+            return None
+        lines = [first]
+        size = len(first)
+        while size <= limit:
+            line = handle.readline(limit - size + 1)
+            if not line:
+                return None
+            lines.append(line)
+            size += len(line)
+            if size > limit:
+                return None
+            if line.strip() == '---':
+                try:
+                    metadata, _ = parse(''.join(lines))
+                except (TypeError, ValueError, RecursionError):
+                    return None
+                return {key: fold(str(metadata[key])).strip() for key in keys
+                        if key in metadata and metadata[key] is not None}
+    return None
+
+
 def _scan_allowed(path, vault, excluded):
     from beyin_v3_index import dir_key
     try:
@@ -271,8 +300,9 @@ def _scan_allowed(path, vault, excluded):
             return False
         if not _is_safe_file(path):
             return False
-        with path.open(encoding='utf-8', errors='replace') as handle:
-            values = _front_values(handle.read(4096), ('visibility', 'trust', 'trusted'))
+        values = _scan_front_values(path, ('visibility', 'trust', 'trusted'))
+        if values is None:
+            return False
         return values.get('visibility') != 'private' and values.get('trust') != 'untrusted' and values.get('trusted') != 'false'
     except (ValueError, OSError):
         return False
