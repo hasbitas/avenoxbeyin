@@ -44,6 +44,16 @@ class ReceiptCaseAliasTest(unittest.TestCase):
                 self.record(source, **metadata)
                 self.assertEqual(_hidden_ref_sources(self.db, [source, alias]), {source, alias})
 
+    def test_alias_lookup_works_while_a_caller_iterates_the_same_connection(self):
+        # SQLite cannot register a function while a statement is open on the connection.
+        self.record('knowledge/ozel.md', visibility='private')
+        self.db.execute('INSERT INTO receipts VALUES (?,?)', ('r', json.dumps({'refs': ['KNOWLEDGE/OZEL.MD']})))
+        for ident in 'stuv':  # the cursor reads one row ahead: later calls run with it still open
+            self.db.execute('INSERT INTO receipts VALUES (?,?)', (ident, json.dumps({'refs': ['knowledge/yok.md']})))
+        hidden = [_hidden_ref_sources(self.db, json.loads(payload)['refs'])
+                  for (payload,) in self.db.execute('SELECT payload FROM receipts ORDER BY id')]
+        self.assertEqual(hidden, [{'KNOWLEDGE/OZEL.MD'}] + [set()] * 4)
+
     def test_internal_and_public_aliases_stay_visible(self):
         for name, metadata in (('default', {}), ('internal', {'visibility': 'internal'}),
                                ('public', {'visibility': 'public'})):

@@ -113,11 +113,15 @@ def _hidden_ref_sources(db, refs):
         for ref in set(chunk) - {source for source, _ in rows} - hidden:
             aliases[ref.casefold()].add(ref)
         if aliases:
-            db.create_function('beyin_casefold', 1, str.casefold, deterministic=True)
-            folded = db.execute('SELECT m.source, r.payload FROM markdown_sources m JOIN records r ON r.id = m.id '
-                                'WHERE beyin_casefold(m.source) IN (' + ','.join('?' * len(aliases)) + ')',
-                                list(aliases)).fetchall()
-            rows.extend((ref, payload) for source, payload in folded for ref in aliases[source.casefold()])
+            # Folded in Python, not with a registered SQL function: SQLite refuses to create
+            # one while a caller still has a statement open on this connection.
+            matched = [source for (source,) in db.execute('SELECT source FROM markdown_sources')
+                       if source.casefold() in aliases]
+            for begin in range(0, len(matched), 500):
+                part = matched[begin:begin + 500]
+                folded = db.execute('SELECT m.source, r.payload FROM markdown_sources m JOIN records r ON r.id = m.id '
+                                    'WHERE m.source IN (' + ','.join('?' * len(part)) + ')', part).fetchall()
+                rows.extend((ref, payload) for source, payload in folded for ref in aliases[source.casefold()])
         for source, payload in rows:
             record = json.loads(payload)
             if (record.get('visibility', 'internal') not in ('public', 'internal') or record.get('trust') == 'untrusted' or
