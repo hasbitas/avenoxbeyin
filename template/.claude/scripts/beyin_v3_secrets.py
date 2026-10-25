@@ -2,18 +2,15 @@
 
 Known patterns and custom literals are scanned in plain text (including code
 blocks), ignoring Unicode Cf format characters while redacting the original span.
-Valid standard base64 pieces of at least 40 characters are decoded once as UTF-8
-and scanned the same way; a secret masks the whole encoded piece. Arbitrary binary
-blobs are not secrets. Nested encodings, base64url and line-split representations
-are not decoded or joined; joining lines would create false positives.
+Base64 representations and line-split representations are unsupported: they are
+not decoded or joined. Decoding arbitrary base64 is not reliable secret detection
+and carries processing-cost and false-positive risks.
 """
 from __future__ import annotations
 
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
-import base64
-import binascii
 import re
 import sqlite3
 import unicodedata
@@ -74,64 +71,79 @@ def _custom_literals(state):
     return values
 
 
-BASE64_PIECE = re.compile(r'(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{38,}={0,2}(?![A-Za-z0-9+/=])')
-
-
 def _without_format(text):
     return ''.join(character for character in text if unicodedata.category(character) != 'Cf')
 
 
-def _sub_normalized(pattern, text, replacement):
-    # Positions map the search view back to the original, including interior Cf.
-    positions = [index for index, character in enumerate(text)
-                 if unicodedata.category(character) != 'Cf']
-    normalized = text if len(positions) == len(text) else ''.join(text[index] for index in positions)
-    parts, end, count = [], 0, 0
-    for match in pattern.finditer(normalized):
-        value = replacement(match)
-        if value is None:
-            continue
-        start, stop = positions[match.start()], positions[match.end() - 1] + 1
-        parts.extend((text[end:start], value))
-        end = stop
+def _sub_normalized(pattern, text, positions):
+    parts, mapped, spans = [], [], []
+    end, count = 0, 0
+    for match in pattern.finditer(text):
+        value = '[REDACTED]'
+        parts.append(text[end:match.start()])
+        mapped.extend(positions[end:match.start()])
+        parts.append(value)
+        mapped.extend([positions[match.start()]] * len(value))
+        spans.append((positions[match.start()], positions[match.end() - 1] + 1, value))
+        end = match.end()
         count += 1
     parts.append(text[end:])
-    return ''.join(parts), count
+    mapped.extend(positions[end:])
+    return ''.join(parts), mapped, spans, count
 
 
-def _redact_plain(text, literals):
-    result, count = text, 0
-    for pattern in BUILTIN_PATTERNS:
-        result, matches = _sub_normalized(pattern, result, lambda match: '[REDACTED]')
-        count += matches
-    for literal in literals:
-        literal = _without_format(literal)
-        if literal:
-            result, matches = _sub_normalized(re.compile(re.escape(literal)), result,
-                                              lambda match: '[REDACTED]')
+def _restore_original(text, spans):
+    merged = []
+    for start, stop, value in sorted(spans):
+        if merged and start < merged[-1][1]:
+            previous = merged[-1]
+            merged[-1] = (previous[0], max(stop, previous[1]), previous[2])
+        else:
+            merged.append((start, stop, value))
+    parts, end = [], 0
+    for start, stop, value in merged:
+        parts.extend((text[end:start], value))
+        end = stop
+    parts.append(text[end:])
+    return ''.join(parts)
+
+
+def _redact(text, patterns):
+    # ASCII cannot contain Cf characters; preserve the original substitution path.
+    if text.isascii() or not any(unicodedata.category(character) == 'Cf' for character in text):
+        result, count = text, 0
+        for pattern in patterns:
+            result, matches = pattern.subn('[REDACTED]', result)
             count += matches
-    return result, count
+        return result, count
+
+    positions = [index for index, character in enumerate(text)
+                 if unicodedata.category(character) != 'Cf']
+    normalized = ''.join(text[index] for index in positions)
+    spans, count = [], 0
+    for pattern in patterns:
+        normalized, positions, found, matches = _sub_normalized(
+            pattern, normalized, positions)
+        spans.extend(found)
+        count += matches
+    return _restore_original(text, spans), count
 
 
 def redact(text, state):
     if not isinstance(text, str):
         raise ValueError('secret filter input must be text')
-    literals = _custom_literals(state)
-    result, count = _redact_plain(text, literals)
-
-    def encoded_secret(match):
-        piece = match.group()
-        if len(piece) < 40:
-            return None
-        try:
-            decoded = base64.b64decode(piece, validate=True).decode('utf-8', errors='replace')
-        except binascii.Error:
-            return None
-        _, matches = _redact_plain(decoded, literals)
-        return '[REDACTED]' if matches else None
-
-    result, matches = _sub_normalized(BASE64_PIECE, result, encoded_secret)
-    return result, count + matches
+    result, count = _redact(text, BUILTIN_PATTERNS)
+    for literal in _custom_literals(state):
+        normalized = _without_format(literal)
+        if len(normalized) >= 4 and '[REDACTED]' not in normalized:
+            result, matches = _redact(result, (re.compile(re.escape(normalized)),))
+        else:
+            # Unsafe normalized values must retain only their original exact match.
+            matches = result.count(literal)
+            if matches:
+                result = result.replace(literal, '[REDACTED]')
+        count += matches
+    return result, count
 
 
 def record(state, count):
