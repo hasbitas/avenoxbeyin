@@ -31,6 +31,7 @@ from beyin_v3_projections import (is_receipt_view_source, is_receipt_view_confli
 from beyin_v3_preferences import read as read_preferences
 from beyin_v3_secrets import redact as redact_secrets, record as record_redactions
 from beyin_v3_notes import (NoteConflict, locked as note_locked,
+                            validate_source_name,
                             read as note_read_source, apply as note_apply_edits)
 
 
@@ -1278,6 +1279,7 @@ class SyncEngine:
             raise ValueError('note text and metadata required')
         if text.lstrip().startswith('---'):
             raise ValueError('text must be body only; put frontmatter fields in metadata')
+        validate_source_name(source)
         if not source.startswith(('notes/', 'knowledge/')) or not source.endswith('.md'):
             raise ValueError('new semantic notes belong under notes/ or knowledge/')
         self._refuse_excluded(source)
