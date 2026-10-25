@@ -99,15 +99,26 @@ def _hidden_ref_sources(db, refs):
     for start in range(0, len(refs), 500):
         chunk = refs[start:start + 500]
         try:
-            rows = db.execute('SELECT r.payload FROM markdown_sources m JOIN records r ON r.id = m.id WHERE m.source IN (' +
+            rows = db.execute('SELECT m.source, r.payload FROM markdown_sources m JOIN records r ON r.id = m.id WHERE m.source IN (' +
                               ','.join('?' * len(chunk)) + ')', chunk).fetchall()
         except sqlite3.OperationalError:  # a bare receipts-only database has no source index
             return hidden
-        for (payload,) in rows:
+        # Old receipts may spell the same file differently. Keep exact matches on the
+        # existing SQL path; only unresolved refs need the Unicode casefold lookup.
+        aliases = defaultdict(set)
+        for ref in set(chunk) - {source for source, _ in rows} - hidden:
+            aliases[ref.casefold()].add(ref)
+        if aliases:
+            db.create_function('beyin_casefold', 1, str.casefold, deterministic=True)
+            folded = db.execute('SELECT m.source, r.payload FROM markdown_sources m JOIN records r ON r.id = m.id '
+                                'WHERE beyin_casefold(m.source) IN (' + ','.join('?' * len(aliases)) + ')',
+                                list(aliases)).fetchall()
+            rows.extend((ref, payload) for source, payload in folded for ref in aliases[source.casefold()])
+        for source, payload in rows:
             record = json.loads(payload)
             if (record.get('visibility', 'internal') not in ('public', 'internal') or record.get('trust') == 'untrusted' or
                     record.get('trusted') is False or record.get('status') == 'untrusted' or record.get('kind') == 'untrusted'):
-                hidden.add(record.get('source'))
+                hidden.add(source)
     return hidden
 
 
