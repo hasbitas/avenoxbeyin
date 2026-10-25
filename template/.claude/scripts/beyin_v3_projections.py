@@ -15,6 +15,9 @@ import math
 # metadata row: the folded directory names the last sync kept out of the index, as a JSON list.
 EXCLUDED_DIRS_ROW = 'index_excluded_dirs'
 RECEIPT_VIEW_SOURCES_ROW = 'receipt_view_sources'
+# Shown in place of a summary whose receipt refers to a private or untrusted source: removing the
+# ref alone does not anonymize the summary, which usually describes that source.
+WITHHELD_SUMMARY = '[summary withheld: the receipt refers to a private or untrusted source]'
 RECEIPT_VIEW_RECEIPT_SUFFIX = '.md.view-provenance.json'
 
 
@@ -229,7 +232,10 @@ def recent_receipts(db, days=7, limit=20, today=None, vault=None, since=None, un
                 missing += 1
             else:
                 kept.append(ref)
-        item = {'created_at': stamp.isoformat(), 'summary': event['summary'], 'source': source, 'refs': kept}
+        item = {'created_at': stamp.isoformat(), 'summary': WITHHELD_SUMMARY if private else event['summary'],
+                'source': source, 'refs': kept}
+        if private:
+            item['summary_withheld'] = True
         if isinstance(event.get('links'), list) and event['links']:
             item['links'] = [link for link in event['links'] if isinstance(link, str)]
         if day is not None:
@@ -673,6 +679,11 @@ def receipt_day(created_at, zone=None):
         return None
 
 
+def _event_refs(event):
+    refs = event.get('refs')
+    return [ref for ref in refs if isinstance(ref, str)] if isinstance(refs, list) else []
+
+
 def _receipt_view_contents(engine, db, warnings=None, *, include_human_daily=False):
     """Render receipts without side effects; include_human_daily is for comparison only."""
     _hash, _, render = engine.projection_helpers()
@@ -684,8 +695,9 @@ def _receipt_view_contents(engine, db, warnings=None, *, include_human_daily=Fal
     historical = set(previous.get('historical_receipts', []))
     zone = _local_zone()
     grouped = defaultdict(list)
-    for row in db.execute('SELECT payload FROM receipts ORDER BY id'):
-        event = json.loads(row[0])
+    events = [json.loads(row[0]) for row in db.execute('SELECT payload FROM receipts ORDER BY id')]
+    hidden = _hidden_ref_sources(db, [ref for event in events for ref in _event_refs(event)])
+    for event in events:
         source = 'receipts/' + _hash(event['event_id']) + '.md'
         if source in historical or not event.get('created_at'):
             continue
@@ -695,7 +707,8 @@ def _receipt_view_contents(engine, db, warnings=None, *, include_human_daily=Fal
             if warnings is not None:
                 warnings.append({'source': source, 'reason': 'unreadable receipt created_at; omitted from daily/v3'})
             continue
-        grouped[day].append((_receipt_instant(event['created_at']), event['created_at'], source, event['summary']))
+        summary = WITHHELD_SUMMARY if hidden.intersection(_event_refs(event)) else event['summary']
+        grouped[day].append((_receipt_instant(event['created_at']), event['created_at'], source, summary))
     desired = {}
     outcomes = []
     for day, items in sorted(grouped.items()):
