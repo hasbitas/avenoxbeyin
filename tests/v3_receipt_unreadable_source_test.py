@@ -25,7 +25,12 @@ from beyin_v3_projections import latest_receipts, recent_receipts
 db = sqlite3.connect((state / 'memory.sqlite3').resolve().as_uri() + '?mode=ro', uri=True)
 try:
     latest = next((event['summary'] for _, event in latest_receipts(db, vault)), None)
-    recap = {item['summary']: [item['refs'], item.get('refs_withheld')] for item in recent_receipts(db, vault=vault)['items']}
+    # Keyed by the summary each receipt was written with: recap shows a placeholder for one with a private ref.
+    import hashlib
+    written = {'receipts/' + hashlib.sha256(event['event_id'].encode()).hexdigest() + '.md': event['summary']
+               for event in (json.loads(payload) for (payload,) in db.execute('SELECT payload FROM receipts'))}
+    recap = {written[item['source']]: [item['refs'], item.get('refs_withheld')]
+             for item in recent_receipts(db, vault=vault)['items']}
 finally:
     db.close()
 print(json.dumps({'latest': latest, 'recap': recap}))
