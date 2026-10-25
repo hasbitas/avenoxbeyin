@@ -4,12 +4,26 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from time import perf_counter
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from v3_passage_test import Vault, runtime  # noqa: E402
 
 CYCLE_REASON = 'supersedes reference is part of a cycle'
+
+
+class CyclePerformanceTest(unittest.TestCase):
+    def test_6000_note_acyclic_chain_resolves_under_one_second(self):
+        records = [{'id': f'n{i}', 'source': f'knowledge/n{i}.md',
+                    'supersedes': [f'n{i + 1}'] if i < 5999 else []}
+                   for i in range(6000)]
+        started = perf_counter()
+        retired, dead = runtime.resolve_supersedes(records)
+        elapsed = perf_counter() - started
+        self.assertEqual(retired, {f'n{i}' for i in range(1, 6000)})
+        self.assertEqual(dead, [])
+        self.assertLess(elapsed, 1.0, f'6000-note chain took {elapsed:.6f}s')
 
 
 class CycleResolutionTest(Vault):

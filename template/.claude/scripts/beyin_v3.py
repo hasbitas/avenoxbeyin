@@ -214,21 +214,46 @@ def _trusted_record(record):
 
 
 def _cyclic_supersedes(edges):
-    """Resolved supersedes edges that lie on a cycle: the target can reach the source back."""
-    cyclic = set()
+    """Find cyclic edges in O(V+E) using iterative Kosaraju SCCs (no recursion)."""
+    reverse = {}
     for source, targets in edges.items():
+        reverse.setdefault(source, [])
         for target in targets:
-            seen, stack = set(), [target]
-            while stack:
-                node = stack.pop()
-                if node == source:
-                    cyclic.add((source, target))
-                    break
-                if node in seen:
-                    continue
-                seen.add(node)
-                stack.extend(edges.get(node, ()))
-    return cyclic
+            reverse.setdefault(target, []).append(source)
+
+    # Keep each DFS frame's iterator so nodes finish only after all descendants.
+    seen, order = set(), []
+    for root in reverse:
+        if root in seen:
+            continue
+        seen.add(root)
+        stack = [(root, iter(edges.get(root, ())))]
+        while stack:
+            node, targets = stack[-1]
+            target = next(targets, None)
+            if target is None:
+                order.append(node)
+                stack.pop()
+            elif target not in seen:
+                seen.add(target)
+                stack.append((target, iter(edges.get(target, ()))))
+
+    # Traverse the transposed graph in reverse finish order to label SCCs once.
+    components = {}
+    for root in reversed(order):
+        if root in components:
+            continue
+        component = len(components)
+        components[root] = component
+        stack = [root]
+        while stack:
+            for target in reverse[stack.pop()]:
+                if target not in components:
+                    components[target] = component
+                    stack.append(target)
+
+    return {(source, target) for source, targets in edges.items() for target in targets
+            if components[source] == components[target]}
 
 
 def resolve_supersedes(records):
